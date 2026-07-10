@@ -56,6 +56,7 @@ class AirControlEngine:
         self.dashboard = AirControlMainDashboard(
             self.ui_shell, on_master_toggle=self._handle_master_switch
         )
+        self.dashboard.on_macro_recorded_callback = self._on_ui_macro_registered_success
 
         # Dynamic thread lifecycle pointers
         self.camera_thread = None
@@ -88,6 +89,9 @@ class AirControlEngine:
         )
         self.vision_thread.ui_signal.connect(
             self.dashboard.update_status
+        )
+        self.vision_thread.gesture_signal.connect(
+            self._relay_coordinates_to_wizard
         )
 
         # Launch
@@ -145,6 +149,18 @@ class AirControlEngine:
             self._stop_backend_agents()
             self.ui_shell.hide()
             print("[Engine] Master OFF")
+
+    def _relay_coordinates_to_wizard(self, state, nx, ny):
+        if self.dashboard.active_dialog and self.dashboard.active_dialog.is_recording:
+            if nx > 0.001:
+                self.dashboard.active_dialog.collect_coordinate(nx, ny)
+
+    def _on_ui_macro_registered_success(self, macro_name, shortcut_keys, trajectory_data):
+        print(f"[Engine] Recording complete: {macro_name} -> {shortcut_keys}")
+        if self.vision_thread and hasattr(self.vision_thread, "dtw_engine"):
+            self.vision_thread.dtw_engine.register_template(
+                f"Custom_{macro_name}", trajectory_data
+            )
 
     def run(self):
         print("[Engine] AirControl 1.0 is now fully operational.")

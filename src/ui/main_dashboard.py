@@ -6,9 +6,10 @@ from PyQt5.QtWidgets import (
     QWidget, QLabel, QVBoxLayout, QHBoxLayout,
     QPushButton, QTableWidget, QTableWidgetItem,
     QHeaderView, QComboBox, QCheckBox,
-    QSystemTrayIcon, QMenu, QAction, QApplication,
+    QDialog, QSystemTrayIcon, QMenu, QAction, QApplication,
 )
 from src.config import EngineConfig
+from src.ui.recording_dialog import GestureRecordingDialog
 
 
 class AirControlMainDashboard(QWidget):
@@ -23,6 +24,8 @@ class AirControlMainDashboard(QWidget):
         self.setFixedSize(800, 550)
         self.drag_position = QPoint()
         self.master_active = True
+        self.on_macro_recorded_callback = None
+        self.active_dialog = None
         self._init_system_tray()
         self._init_ui()
         self._apply_initial_config()
@@ -123,31 +126,34 @@ class AirControlMainDashboard(QWidget):
         pl.addWidget(QLabel("Gesture Matrix", self))
         pl.addSpacing(10)
 
-        self.table = QTableWidget(4, 4, self)
+        self.table = QTableWidget(0, 4, self)
         self.table.setHorizontalHeaderLabels(["Gesture", "System Action", "Status", "Action"])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionMode(QTableWidget.NoSelection)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
 
-        self._add_gesture_row(0, "Point Up", "Move cursor", True, True)
-        self._add_gesture_row(1, "Pinch", "Left click", True, True)
-        self._add_gesture_row(2, "V-Sign", "Scroll", True, True)
-        self._add_gesture_row(3, "Circle", "Macro [Win+Shift+S]", False, False)
+        self.append_new_gesture_row("Point Up", "Move cursor", True, True)
+        self.append_new_gesture_row("Pinch", "Left click", True, True)
+        self.append_new_gesture_row("V-Sign", "Scroll", True, True)
+        self.append_new_gesture_row("Circle", "Macro [Win+Shift+S]", False, False)
 
         pl.addWidget(self.table)
         rl.addWidget(mp)
         rl.addSpacing(15)
 
-        future_btn = QPushButton("+ Record custom gesture macro (2.0 coming soon)", self)
-        future_btn.setEnabled(False)
-        future_btn.setStyleSheet("background: transparent; border: 2px dashed rgba(255,255,255,20); border-radius: 12px; color: rgba(255,255,255,80); padding: 12px; font-family: Segoe UI; font-weight: bold;")
-        rl.addWidget(future_btn)
+        self.record_btn = QPushButton("+ Record custom gesture macro (1.1 core feature)", self)
+        self.record_btn.setEnabled(True)
+        self.record_btn.setStyleSheet("background: rgba(0, 242, 254, 8); border: 2px dashed rgba(0, 242, 254, 50); border-radius: 12px; color: #00F2FE; padding: 12px; font-family: Segoe UI; font-weight: bold;")
+        self.record_btn.clicked.connect(self._launch_recording_wizard)
+        rl.addWidget(self.record_btn)
 
         main_layout.addWidget(sidebar)
         main_layout.addWidget(rc)
 
-    def _add_gesture_row(self, row, name, action, checked, locked):
+    def append_new_gesture_row(self, name, action, checked, locked):
+        row = self.table.rowCount()
+        self.table.insertRow(row)
         self.table.setItem(row, 0, QTableWidgetItem(name))
         self.table.setItem(row, 1, QTableWidgetItem(action))
         cbw = QWidget(); cbl = QHBoxLayout(cbw); cbl.setContentsMargins(0,0,0,0); cbl.setAlignment(Qt.AlignCenter)
@@ -159,7 +165,9 @@ class AirControlMainDashboard(QWidget):
         else:
             d = QPushButton("Delete", self)
             d.setStyleSheet("background: rgba(255,0,128,20); border: 1px solid rgba(255,0,128,40); border-radius: 4px; color: #FF0080; padding: 2px 8px; font-size: 11px;")
-            d.clicked.connect(lambda: self._delete_macro_row(row))
+            def make_handler(r=row, n=name):
+                return lambda: self._handle_row_deletion(r, n)
+            d.clicked.connect(make_handler())
             bl.addWidget(d)
         self.table.setCellWidget(row, 3, bw)
         self.table.setRowHeight(row, 36)
@@ -200,9 +208,22 @@ class AirControlMainDashboard(QWidget):
         self.telemetry_label.setText(f"O {state} ({intensity:.2f})")
         self.telemetry_label.setStyleSheet(f"color: {colors.get(pfx, '#00F2FE')}; font-size: 10pt; font-weight: bold;")
 
-    def _delete_macro_row(self, row):
-        self.table.setRowHidden(row, True)
-        print(f"[Dashboard] Macro row {row} hidden")
+    def _handle_row_deletion(self, row_index, gesture_name):
+        self.table.removeRow(row_index)
+        print(f"[Dashboard] Removed row {row_index}: {gesture_name}")
+
+    def _launch_recording_wizard(self):
+        self.active_dialog = GestureRecordingDialog(self)
+        if self.active_dialog.exec() == QDialog.Accepted:
+            name = self.active_dialog.recorded_name
+            shortcut = self.active_dialog.recorded_shortcut
+            trajectory = self.active_dialog.recorded_trajectory
+            display_name = f"Macro: {name}"
+            display_action = f"Shortcut [{shortcut}]"
+            self.append_new_gesture_row(display_name, display_action, True, False)
+            if self.on_macro_recorded_callback:
+                self.on_macro_recorded_callback(name, shortcut, trajectory)
+        self.active_dialog = None
 
     def _apply_initial_config(self):
         self.theme_combo.setCurrentIndex(EngineConfig.CURRENT_THEME_INDEX)
