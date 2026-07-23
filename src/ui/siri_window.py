@@ -20,8 +20,11 @@ class GlowCapsule(QWidget):
         "MACRO_SAVED":     (QColor(0, 220, 100), "\u2713"),
     }
 
-    def __init__(self, parent, screen_w, screen_h):
-        super().__init__(parent)
+    def __init__(self, screen_w, screen_h):
+        super().__init__()
+        self.setWindowFlags(
+            Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool
+        )
         self.setAttribute(Qt.WA_TranslucentBackground)
 
         self.get_phase = lambda: 0.0
@@ -33,9 +36,10 @@ class GlowCapsule(QWidget):
         self.accent = QColor(120, 120, 120)
         self.pulse = 1.0
         self.target_pulse = 1.0
+        self._drag_pos = None
 
         cw, ch = 380, 52
-        self.setGeometry((screen_w - cw) // 2, screen_h - ch - 50, cw, ch)
+        self.setGeometry((screen_w - cw) // 2, 20, cw, ch)
         self._build_labels()
 
     def _build_labels(self):
@@ -81,6 +85,21 @@ class GlowCapsule(QWidget):
             self.pulse += diff * 0.15
             self.update()
 
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._drag_pos = event.globalPos() - self.pos()
+            event.accept()
+
+    def mouseMoveEvent(self, event):
+        if event.buttons() == Qt.LeftButton and self._drag_pos:
+            new_pos = event.globalPos() - self._drag_pos
+            parent = self.parent()
+            if parent:
+                new_pos.setX(max(0, min(parent.width() - self.width(), new_pos.x())))
+                new_pos.setY(max(0, min(parent.height() - self.height(), new_pos.y())))
+                self.move(new_pos)
+            event.accept()
+
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
@@ -120,7 +139,7 @@ class GlowCapsule(QWidget):
 
         # 1. Outer glow ring (thick, low alpha, phase-offset)
         inset = 6 * p
-        painter.setPen(mk_grad(1.0, 8, 35, 0.3))
+        painter.setPen(mk_grad(1.0, 10, 70, 0.4))
         painter.setBrush(Qt.NoBrush)
         painter.drawRoundedRect(
             int(inset), int(inset),
@@ -129,7 +148,7 @@ class GlowCapsule(QWidget):
         )
 
         # 2. Glassmorphism background
-        bg_alpha = 160 if is_sleep else 210
+        bg_alpha = 200 if is_sleep else 240
         painter.setBrush(QBrush(QColor(16, 16, 22, bg_alpha)))
         painter.setPen(Qt.NoPen)
         painter.drawRoundedRect(
@@ -144,7 +163,7 @@ class GlowCapsule(QWidget):
         )
 
         # 4. Inner gradient border
-        ba = 200 if is_click else 180
+        ba = 220 if is_click else 200
         painter.setPen(mk_grad(0.5, 1.5, ba, 0.4))
         painter.setBrush(Qt.NoBrush)
         painter.drawRoundedRect(
@@ -173,7 +192,8 @@ class SiriGlowShell(QWidget):
             QColor(255, 0, 128),
         ]
 
-        self.card = GlowCapsule(self, screen_w, screen_h)
+        self.card = GlowCapsule(screen_w, screen_h)
+        self.card.show()
         self.card.get_phase = lambda: self.phase
         self.card.get_palette = lambda: self.color_palette
 
@@ -190,6 +210,10 @@ class SiriGlowShell(QWidget):
         ) * 0.15
         self.card.tick_pulse()
         self.update()
+
+    def set_glow_active(self, active):
+        self.target_intensity = 0.15 if active else 0.0
+        self.card.setVisible(active)
 
     def update_ui_state(self, state, intensity):
         self.target_intensity = max(0.05, min(1.0, intensity))
@@ -238,6 +262,21 @@ class SiriGlowShell(QWidget):
         if state in text_map:
             self.card.status_label.setText(text_map[state])
 
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._drag_pos = event.globalPos() - self.pos()
+            event.accept()
+
+    def mouseMoveEvent(self, event):
+        if event.buttons() == Qt.LeftButton and self._drag_pos:
+            new_pos = event.globalPos() - self._drag_pos
+            parent = self.parent()
+            if parent:
+                new_pos.setX(max(0, min(parent.width() - self.width(), new_pos.x())))
+                new_pos.setY(max(0, min(parent.height() - self.height(), new_pos.y())))
+                self.move(new_pos)
+            event.accept()
+
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
@@ -252,7 +291,7 @@ class SiriGlowShell(QWidget):
         x2 = cx - r_dist * math.cos(self.phase)
         y2 = cy - r_dist * math.sin(self.phase)
 
-        base_alpha = int(230 * self.current_intensity)
+        base_alpha = int(690 * self.current_intensity)
 
         configs = [
             (24, 0.20),

@@ -1,4 +1,3 @@
-# src/vision/pipeline.py
 import queue
 import threading
 
@@ -7,11 +6,6 @@ import mediapipe as mp
 from PyQt5.QtCore import QThread, pyqtSignal
 
 from src.config import EngineConfig
-from src.vision.dtw_recognizer import DTWRecognizer
-
-import numpy as np
-import math
-
 
 class FramePipeline:
     def __init__(self):
@@ -28,6 +22,7 @@ class FramePipeline:
             self.buffer.put(frame)
 
     def pop(self):
+        # 阻塞在此，直到主线程推帧，或者推入退出毒药丸 None
         return self.buffer.get(block=True)
 
 
@@ -49,6 +44,9 @@ class VisionAgentThread(QThread):
             min_detection_confidence=0.5,
             min_tracking_confidence=0.5,
         )
+        self._state_buffer = []
+        self._last_emitted_state = "RELEASE"
+
 
         # Hand gesture: regular inference
         self.mp_hands = mp.solutions.hands
@@ -60,24 +58,16 @@ class VisionAgentThread(QThread):
             min_tracking_confidence=0.5,
         )
 
-        # DTW gesture macro engine
-        self.dtw_engine = DTWRecognizer()
-        self.active_trajectory = []
-        self.is_recording_mode = False
+        # State debounce: prevent SCROLL->MOVE flicker
 
-        # Pre-register a circle gesture template for zero cold-start
-        mock_circle = [
-            [math.cos(t), math.sin(t)]
-            for t in np.linspace(0, 2 * math.pi, 30)
-        ]
-        self.dtw_engine.register_template("CIRCLE_MACRO", mock_circle)
-
+        
     def run(self):
         print("[Thread] Vision agent started.")
         while self.running:
             frame = self.pipeline.pop()
-            # Poison pill check: None means kill yourself
-            if frame is None:
+            
+            # ── 💡 注入：毒药丸退出哨兵 ──
+            if frame is None or not self.running:
                 break
 
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -109,13 +99,11 @@ class VisionAgentThread(QThread):
             if not is_focused:
                 self.gesture_signal.emit("RELEASE", 0.0, 0.0)
                 self.ui_signal.emit("SLEEP", 0.08)
-                self.active_trajectory = []
                 continue
 
             if not EngineConfig.ENGINE_ACTIVE:
                 self.gesture_signal.emit("RELEASE", 0.0, 0.0)
                 self.ui_signal.emit("SLEEP", 0.08)
-                self.active_trajectory = []
                 continue
 
             # --- Step 2: Hand gesture inference ---
@@ -127,61 +115,32 @@ class VisionAgentThread(QThread):
                 middle_tip, middle_mcp = landmarks[12], landmarks[9]
                 ring_tip, ring_mcp = landmarks[16], landmarks[13]
 
-                pinch_dist = (
-                    (thumb_tip.x - index_tip.x) ** 2
-                    + (thumb_tip.y - index_tip.y) ** 2
-                ) ** 0.5
-                index_is_open = index_tip.y < index_mcp.y
-                middle_is_open = middle_tip.y < middle_mcp.y
-                ring_is_open = ring_tip.y < ring_mcp.y
 
-                # --- Gesture macro recording mode ---
-                if index_is_open and middle_is_open and ring_is_open and pinch_dist > 0.08:
-                    if not self.is_recording_mode:
-                        self.is_recording_mode = True
-                        self.active_trajectory = []
-                    self.active_trajectory.append([index_tip.x, index_tip.y])
-                    self.gesture_signal.emit("MACRO_RECORDING", 0.0, 0.0)
-                    self.ui_signal.emit("MACRO_RECORDING", 0.75)
-                    continue
+                # --- Gesture state machine ---
+                pd = ((thumb_tip.x - middle_tip.x)**2 + (thumb_tip.y - middle_tip.y)**2)**0.5
+                io = index_tip.y < index_mcp.y
+                mo = middle_tip.y < middle_mcp.y
+                spread = abs(index_tip.x - middle_tip.x)
 
+                if io and mo:
+                    raw_state, intensity = "SCROLL", 0.7
+                elif pd < EngineConfig.PINCH_THRESHOLD:
+                    raw_state, intensity = "CLICK", 0.9
+                elif io:
+                    raw_state, intensity = "MOVE", 0.5
                 else:
-                    if self.is_recording_mode:
-                        self.is_recording_mode = False
-                        if (
-                            len(self.active_trajectory) > 10
-                            and "CUSTOM_S_MACRO" not in self.dtw_engine.templates
-                        ):
-                            self.dtw_engine.register_template(
-                                "CUSTOM_S_MACRO", self.active_trajectory
-                            )
-                            self.ui_signal.emit("MACRO_SAVED", 1.0)
-                        self.active_trajectory = []
-                        continue
+                    raw_state, intensity = "RELEASE", 0.15
 
-                # --- Sliding window DTW match ---
-                if index_is_open:
-                    self.active_trajectory.append([index_tip.x, index_tip.y])
-                    if len(self.active_trajectory) > EngineConfig.MACRO_WINDOW_SIZE:
-                        self.active_trajectory.pop(0)
-
-                    matched = self.dtw_engine.match(self.active_trajectory)
-                    if matched:
-                        self.gesture_signal.emit(matched, 0.0, 0.0)
-                        self.ui_signal.emit(matched, 1.0)
-                        self.active_trajectory = []
-                        continue
-
-                # --- Base gesture state machine ---
-                if pinch_dist < EngineConfig.PINCH_THRESHOLD:
-                    state, intensity = "CLICK", 0.9
-                elif index_is_open and middle_is_open and not ring_is_open:
-                    state, intensity = "SCROLL", 0.7
-                elif index_is_open:
-                    state, intensity = "MOVE", 0.5
-                else:
-                    state, intensity = "RELEASE", 0.15
-                    self.active_trajectory = []
+                # Debounce: 5-frame buffer, 3/5 majority
+                self._state_buffer.append(raw_state)
+                if len(self._state_buffer) > 5:
+                    self._state_buffer.pop(0)
+                counts = {}
+                for s in self._state_buffer:
+                    counts[s] = counts.get(s, 0) + 1
+                best = max(counts, key=counts.get)
+                state = best if counts[best] >= 3 else self._last_emitted_state
+                self._last_emitted_state = state
 
                 self.gesture_signal.emit(state, index_tip.x, index_tip.y)
                 self.ui_signal.emit(state, intensity)
@@ -189,7 +148,6 @@ class VisionAgentThread(QThread):
             else:
                 self.gesture_signal.emit("RELEASE", 0.0, 0.0)
                 self.ui_signal.emit("RELEASE", 0.15)
-                self.active_trajectory = []
 
         print("[Thread] Vision agent exited cleanly.")
 

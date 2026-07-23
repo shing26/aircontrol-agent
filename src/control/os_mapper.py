@@ -1,4 +1,3 @@
-# src/control/os_mapper.py
 import math
 import time
 
@@ -7,33 +6,42 @@ from pynput.mouse import Button, Controller as MouseController
 
 from src.config import EngineConfig
 
+class OneEuroFilter:
+    """P2 级别打磨：自适应一欧元低通滤波器"""
+    def __init__(self, t0, x0, min_cutoff=1.0, beta=0.0, d_cutoff=1.0):
+        self.min_cutoff = min_cutoff
+        self.beta = beta
+        self.d_cutoff = d_cutoff
+        self.x_prev = x0
+        self.t_prev = t0
+        self.dx_prev = 0.0
 
-class AdaptiveSmoother:
-    def __init__(self):
-        self.sx, self.sy = None, None
+    def __call__(self, t, x):
+        te = t - self.t_prev
+        if te <= 0.0:
+            return self.x_prev
 
-    def update(self, rx, ry):
-        if self.sx is None:
-            self.sx, self.sy = rx, ry
-            return rx, ry
+        # 1. 计算速度变化，并用低通滤波器去抖速度
+        dx = (x - self.x_prev) / te
+        alpha_d = 1.0 / (1.0 + (1.0 / (2.0 * math.pi * self.d_cutoff * te)))
+        dx_hat = alpha_d * dx + (1.0 - alpha_d) * self.dx_prev
 
-        velocity = math.hypot(rx - self.sx, ry - self.sy)
+        # 2. 根据速度动态调整当前位置的截止频率
+        cutoff = self.min_cutoff + self.beta * abs(dx_hat)
+        
+        # 3. 计算最终滤波位置
+        alpha = 1.0 / (1.0 + (1.0 / (2.0 * math.pi * cutoff * te)))
+        x_hat = alpha * x + (1.0 - alpha) * self.x_prev
 
-        if velocity < EngineConfig.MOUSE_DEAD_ZONE:
-            return int(self.sx), int(self.sy)
+        self.x_prev = x_hat
+        self.t_prev = t
+        self.dx_prev = dx_hat
+        return x_hat
 
-        ratio = min(1.0, velocity / EngineConfig.VELOCITY_THRESHOLD)
-        alpha = EngineConfig.ALPHA_MIN + (
-            EngineConfig.ALPHA_MAX - EngineConfig.ALPHA_MIN
-        ) * (ratio ** 2)
-
-        self.sx = alpha * rx + (1.0 - alpha) * self.sx
-        self.sy = alpha * ry + (1.0 - alpha) * self.sy
-        return int(self.sx), int(self.sy)
-
-    def reset(self):
-        self.sx, self.sy = None, None
-
+    def reset(self, t, x):
+        self.t_prev = t
+        self.x_prev = x
+        self.dx_prev = 0.0
 
 class InputMapper:
     def __init__(self, screen_w, screen_h):
@@ -41,62 +49,53 @@ class InputMapper:
         self.sh = screen_h
         self.mouse = MouseController()
         self.keyboard = KeyboardController()
-        self.smoother = AdaptiveSmoother()
+
+        # ── 💡 升级：一欧元双通道去抖滤镜 ──
+        t_init = time.time()
+        self.filter_x = OneEuroFilter(t_init, screen_w / 2, EngineConfig.ONE_EURO_MIN_CUTOFF, EngineConfig.ONE_EURO_BETA, EngineConfig.ONE_EURO_D_CUTOFF)
+        self.filter_y = OneEuroFilter(t_init, screen_h / 2, EngineConfig.ONE_EURO_MIN_CUTOFF, EngineConfig.ONE_EURO_BETA, EngineConfig.ONE_EURO_D_CUTOFF)
 
         self.lock_until = 0.0
         self.was_clicking = False
 
         # Scroll baseline cache
         self.last_scroll_y = None
+        self._prev_state = None
+        self._prev_state = None
 
     def on_gesture_received(self, state: str, nx: float, ny: float):
         current_time = time.time()
+        prev = self._prev_state
+        self._prev_state = state
+        prev = self._prev_state
+        self._prev_state = state
 
-        # --- Macro interception: DTW gesture macro trigger ---
-        if "MACRO" in state:
-            if state == "CIRCLE_MACRO":
-                print("[Macro] Circle detected! Triggering Win+Shift+S (snipping tool)...")
-                self.keyboard.press(Key.cmd)
-                self.keyboard.press(Key.shift)
-                self.keyboard.press("s")
-                self.keyboard.release("s")
-                self.keyboard.release(Key.shift)
-                self.keyboard.release(Key.cmd)
-
-            elif state == "CUSTOM_S_MACRO":
-                print("[Macro] Custom S detected! Executing Ctrl+A then Ctrl+C...")
-                with self.keyboard.pressed(Key.ctrl):
-                    self.keyboard.tap("a")
-                    time.sleep(0.05)
-                    self.keyboard.tap("c")
-            return
-
-        if state == "MACRO_RECORDING":
-            # Suppress all cursor movement during trajectory recording
-            return
-
-        # --- State exit reset chain ---
-        if state != "SCROLL":
-            self.last_scroll_y = None
-
-        if state == "RELEASE":
-            self.smoother.reset()
-            if self.was_clicking:
-                self.mouse.release(Button.left)
-                self.was_clicking = False
-            return
-
-        # --- Calibrated spatial remapping ---
+        # --- 3. 完全保留原有舒适空间重映射（P1） ---
         cx = max(EngineConfig.CALIB_X_MIN, min(EngineConfig.CALIB_X_MAX, nx))
         cy = max(EngineConfig.CALIB_Y_MIN, min(EngineConfig.CALIB_Y_MAX, ny))
         range_x = EngineConfig.CALIB_X_MAX - EngineConfig.CALIB_X_MIN
         range_y = EngineConfig.CALIB_Y_MAX - EngineConfig.CALIB_Y_MIN
+
         nx_cal = (cx - EngineConfig.CALIB_X_MIN) / (range_x if range_x > 0 else 1)
         ny_cal = (cy - EngineConfig.CALIB_Y_MIN) / (range_y if range_y > 0 else 1)
         raw_x = int((1.0 - nx_cal) * self.sw)
         raw_y = int(ny_cal * self.sh)
 
-        # --- SCROLL mode early intercept ---
+        # --- 2. 状态退出重置链 ---
+        if state != "SCROLL":
+            self.last_scroll_y = None
+        self._prev_state = None
+
+        if state == "RELEASE":
+            # 释放时清空一欧元历史
+            t_now = time.time()
+            # keep filter position (no center jump)
+            if self.was_clicking:
+                self.mouse.release(Button.left)
+                self.was_clicking = False
+            return
+
+        # --- 4. 完全保留原有 SCROLL 早期拦截 ---
         if state == "SCROLL":
             if self.was_clicking:
                 self.mouse.release(Button.left)
@@ -115,21 +114,28 @@ class InputMapper:
                     self.last_scroll_y = ny
             return
 
-        # --- Click coordinate lock intercept ---
+        # --- 5. 💡 注入：P0 点击防抖锁与一欧元滤波融合 ---
+        # 5a. 如果处于 150ms 锁定保护中，拒绝任何更新，直接返回
         if current_time < self.lock_until:
             return
 
-        tx, ty = self.smoother.update(raw_x, raw_y)
+        # 5b. 利用一欧元滤波器（P2）进行高动态去抖
+        tx = int(self.filter_x(current_time, raw_x))
+        ty = int(self.filter_y(current_time, raw_y))
 
-        # --- Normal mouse control ---
+        # --- 6. 正常键鼠注入 ---
         if state == "MOVE":
             if self.was_clicking:
                 self.mouse.release(Button.left)
                 self.was_clicking = False
+            if prev == "SCROLL":
+                self.filter_x.reset(current_time, raw_x)
+                self.filter_y.reset(current_time, raw_y)
             self.mouse.position = (tx, ty)
 
         elif state == "CLICK":
             if not self.was_clicking:
+                # 进入合拢瞬间：锁定 150ms[cite: 3]
                 self.lock_until = current_time + EngineConfig.CLICK_LOCK_DURATION
                 self.mouse.position = (tx, ty)
                 self.mouse.press(Button.left)
